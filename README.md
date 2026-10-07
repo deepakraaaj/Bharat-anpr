@@ -1,28 +1,91 @@
 # Bharat ANPR
 
-Offline-first Indian automatic number plate recognition for Android. CameraX analyzes throttled rear-camera frames, a replaceable detector proposes plate crops, quality gates reject unusable crops, Tesseract OCR reads only those crops, Indian-format logic corrects context-specific OCR errors, and an IoU tracker performs weighted multi-frame voting before Room persistence.
+## About
+
+Bharat ANPR is an offline-first Android application for detecting and reading Indian vehicle registration plates from a live camera preview. It is built as a modular prototype: camera capture, plate detection, image preparation, OCR, Indian-format parsing, multi-frame tracking, local history, and the Compose UI are separated so individual implementations can be replaced and improved.
+
+The current build provides an end-to-end scanning pipeline, but its plate detector is a classical computer-vision fallback rather than a trained ANPR model. Treat recognition quality as experimental until it has been validated on representative road and device conditions.
+
+## TL;DR
+
+- Native Android app using Kotlin, Jetpack Compose, CameraX, Room, DataStore, Hilt, and coroutines.
+- Processes camera frames on-device; ML Kit Latin text recognition is the currently injected OCR implementation. A Tesseract recognizer implementation and English data asset are also present.
+- Detects candidate regions with a model-free vertical-edge heuristic, then crops, quality-checks, and enhances candidates before OCR.
+- Parses standard Indian and Bharat-series registration formats, tracks candidates across frames, and saves finalized plate events to a local Room database.
+- No sign-in, network permission, telemetry, or cloud OCR; plate-detection accuracy is limited by the heuristic detector and needs field validation.
+
+## What is implemented
+
+- **Live camera flow:** CameraX binds a rear-camera preview and image analysis to the activity lifecycle. `KEEP_ONLY_LATEST` avoids queuing stale frames; a frame throttle and single-flight guard limit work to at most two analysis submissions per second.
+- **Detection boundary and fallback:** `PlateDetector` defines the replaceable detector API. The current implementation scans reduced-resolution image regions for vertical-edge density, selects up to three non-overlapping candidates, expands their boxes, and assigns heuristic confidence. It uses no external detector weights.
+- **Crop preparation:** Candidate boxes are clamped to the source frame before cropping. The quality gate checks minimum dimensions, brightness, edge-based sharpness, and aspect ratio. Accepted crops are resized; Otsu thresholding and small-angle rotation are tried as OCR alternatives when parsing the first result does not pass the format confidence gate.
+- **On-device OCR:** The active Hilt binding is `MlKitPlateRecognizer`, using ML Kit's bundled Latin text-recognition model. The OCR interface is replaceable. A singleton, mutex-protected Tesseract implementation is included in the source, but is not the active binding.
+- **Indian registration parsing:** Text is normalized to uppercase letters and digits. The parser recognizes standard state/district/series/number layouts and Bharat-series plates, validates state/UT prefixes, and applies character corrections according to the expected letter or digit segment.
+- **Temporal tracking and duplicate suppression:** Bounding boxes are associated using intersection-over-union (IoU); recent observations contribute OCR, detector, crop-quality, and format-validity evidence to a temporal vote. A plate is eligible to finalize after at least two observations and a weighted confidence of at least 0.75. A configurable cooldown suppresses repeated database events for the same plate.
+- **Local data and UI:** Finalized events are written to Room and exposed as a history flow. Jetpack Compose provides scanner, history, settings, and About screens. DataStore persists settings.
+- **Dependency injection and tests:** Hilt provides application-scoped bindings for the detector, recognizer, database, and repository. JVM tests cover plate parsing, bounding-box behavior, and tracking; an Android launch test is also present.
+
+## Technical implementation
+
+```text
+CameraX preview + YUV analysis
+    → KEEP_ONLY_LATEST
+    → frame throttle + single-flight guard
+    → PlateDetector (current: vertical-edge heuristic)
+    → bounding-box crop + image-quality gate
+    → resize / optional threshold or rotation retry
+    → PlateRecognizer (current binding: ML Kit)
+    → normalization + Indian-format parsing/correction
+    → IoU track association + weighted temporal voting
+    → duplicate cooldown
+    → Room plate history
+    → Compose scanner and history UI
+```
+
+### Main code areas
+
+| Area | Responsibility |
+| --- | --- |
+| `camera` | CameraX lifecycle binding, frame sources, YUV-to-bitmap conversion, and frame throttling |
+| `detection` | Detector interface, detection geometry, and model-free heuristic implementation |
+| `processing` | Bounding-box crop, image-quality scoring, resizing, thresholding, and rotation |
+| `recognition` | OCR interface plus ML Kit and Tesseract implementations |
+| `plate` | Normalization, Indian state/UT codes, segment-aware correction, and format parsing |
+| `tracking` | IoU-based track association, weighted voting, and duplicate cooldown |
+| `data` | Room entity/DAO/database and repository for local plate history |
+| `settings` | DataStore-backed settings |
+| `pipeline` | Background orchestration of detection through persistence |
+| `ui`, `di` | Compose screens, ViewModel, and Hilt bindings |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for design notes, [TESTING.md](TESTING.md) for the device test checklist, [PERFORMANCE.md](PERFORMANCE.md) for performance notes, and [ENGINEERING_REPORT.md](ENGINEERING_REPORT.md) for verification status and known risks.
 
 ## Build and run
 
-Install JDK 17 and Android SDK 35, then run `./gradlew assembleDebug`. Install `app/build/outputs/apk/debug/app-debug.apk`, grant Camera permission, and scan a well-lit, near-horizontal plate. No sign-in or network connection is used at runtime.
+Prerequisites: JDK 17 and Android SDK platform 36. From the project root:
 
-The checked-in detector is a small classical vertical-edge-band fallback. It carries no model-weight licensing risk and keeps the entire pipeline operational, but it is less accurate than a trained plate detector. A commercial deployment should implement `PlateDetector`, bundle weights with documented redistribution rights, bind it in `AppModule`, and validate the model against the image harness before release. Do not add weights without recording their exact source, version, checksum, and license in `MODEL_LICENSES.md`.
+```bash
+./gradlew testDebugUnitTest
+./gradlew assembleDebug
+```
 
-## Structure
+Install `app/build/outputs/apk/debug/app-debug.apk`, grant camera permission, and scan a well-lit, near-horizontal plate. No sign-in or network connection is needed at runtime. For connected-device tests, run:
 
-- `camera`: CameraX binding, YUV conversion, frame throttling and frame-source contract.
-- `detection`: detector boundary, geometry and model-free fallback.
-- `processing`: crop, quality scoring and resize.
-- `recognition`: replaceable OCR boundary and singleton Tesseract engine.
-- `plate`: normalization, state registry, contextual correction and segmented parsing.
-- `tracking`: IoU association, weighted voting and duplicate cooldown.
-- `data`: Room persistence and repository.
-- `settings`, `pipeline`, `ui`, `di`: configuration, orchestration, screens and dependency bindings.
+```bash
+./gradlew connectedDebugAndroidTest
+```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md), [TESTING.md](TESTING.md), [PERFORMANCE.md](PERFORMANCE.md), [MODEL_LICENSES.md](MODEL_LICENSES.md), and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+## Current limitations and next steps
 
-## Privacy and limitations
+- The edge-density detector is a safe, model-free integration baseline, not a plate-trained detector. Expect weak results with distant, skewed, blurred, reflective, dirty, occluded, night-time, and two-line motorcycle plates. It can return up to three candidates but does not reliably detect multiple vehicles.
+- The active ML Kit model is general Latin text recognition, not a model trained specifically for Indian number plates. The included Tesseract implementation is not the active recognizer.
+- Camera overlay alignment and recognition accuracy have not been validated across physical devices and aspect ratios. No emulator or physical-device validation is recorded in the engineering report.
+- Settings for image saving, sound, vibration, debug overlay, and retention are persisted, but corresponding operational features such as saving crops and retention cleanup are not implemented. The current pipeline does not persist plate images or full camera frames.
+- Before production use, replace the fallback detector with a legally sourced or trained plate-specific model, document its provenance and checksum, add a representative golden-image test set, validate camera transforms and lifecycle behavior on devices, and benchmark accuracy, latency, and thermal behavior.
 
-Frames stay in memory and are discarded after analysis. Full frames are never stored. Crop saving is off by default and the current release does not save crops even if the reserved setting is enabled. There is no INTERNET permission, telemetry, location, or analytics. Plates can still be personal data; define retention and access controls for the deployment jurisdiction.
+## Privacy
 
-Accuracy falls with distant, reflective, dirty, occluded, blurred, strongly skewed and two-line motorcycle plates. The fallback detector is intended as a safe baseline and integration point, not a substitute for field validation. Multiple simultaneous plates are accepted by the interfaces, while the fallback generally returns its single strongest region.
+Frame processing is local and in memory; full camera frames are not stored. Finalized recognition events are kept in the on-device Room database. The app does not request internet access and has no cloud OCR, account, analytics, or telemetry. Plate numbers may still be personal data, so deployments should define appropriate retention, access, and deletion policies.
+
+## Licenses
+
+Third-party dependency and model notices are documented in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and [MODEL_LICENSES.md](MODEL_LICENSES.md). Do not add model weights without verifying redistribution and training-data rights and recording the source, version, checksum, and license.
