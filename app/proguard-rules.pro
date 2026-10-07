@@ -1,0 +1,3 @@
+-keep class com.googlecode.tesseract.** { *; }
+-keep class com.googlecode.leptonica.** { *; }
+-keepattributes *Annotation*
