@@ -27,19 +27,19 @@ The current build provides an end-to-end scanning pipeline, but its plate detect
 
 ## Technical implementation
 
-```text
-CameraX preview + YUV analysis
-    → KEEP_ONLY_LATEST
-    → frame throttle + single-flight guard
-    → PlateDetector (current: vertical-edge heuristic)
-    → bounding-box crop + image-quality gate
-    → resize / optional threshold or rotation retry
-    → PlateRecognizer (current binding: ML Kit)
-    → normalization + Indian-format parsing/correction
-    → IoU track association + weighted temporal voting
-    → duplicate cooldown
-    → Room plate history
-    → Compose scanner and history UI
+```mermaid
+flowchart LR
+    A["CameraX preview and YUV analysis"] --> B["KEEP_ONLY_LATEST"]
+    B --> C["Frame throttle and single-flight guard"]
+    C --> D["PlateDetector<br/>vertical-edge heuristic"]
+    D --> E["Crop and image-quality gate"]
+    E --> F["Resize<br/>optional threshold or rotation retry"]
+    F --> G["PlateRecognizer<br/>active binding: ML Kit"]
+    G --> H["Normalize, parse, and correct<br/>Indian registration format"]
+    H --> I["IoU track association<br/>weighted temporal voting"]
+    I --> J["Duplicate cooldown"]
+    J --> K["Room plate history"]
+    K --> L["Compose scanner and history UI"]
 ```
 
 ### Main code areas
