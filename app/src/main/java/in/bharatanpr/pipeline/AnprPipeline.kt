@@ -6,15 +6,13 @@ import com.bharatanpr.data.repository.PlateRepository
 import com.bharatanpr.detection.*
 import com.bharatanpr.plate.IndianPlateParser
 import com.bharatanpr.plate.ParsedPlate
+import com.bharatanpr.plate.PlateFragmentMerger
 import com.bharatanpr.processing.*
 import com.bharatanpr.recognition.PlateRecognizer
 import com.bharatanpr.recognition.RecognitionResult
 import com.bharatanpr.tracking.*
 import com.bharatanpr.util.AnprLog
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -148,8 +146,8 @@ class AnprPipeline @Inject constructor(
         var incompletePlateSeen = false
         var verifyingPlate: String? = null
         var verifyingConfidence = 0f
-        var verifyingObservations = 0
         val selectableCandidates = mutableListOf<PlateCandidate>()
+        val ocrFragments = mutableListOf<String>()
 
         for (detection in detections) {
             val crop = runCatching { PlateCropper.crop(frame, detection.boundingBox) }
@@ -181,32 +179,20 @@ class AnprPipeline @Inject constructor(
                 parsed.validationConfidence < .70f ||
                 !IndianPlateParser.isCompleteScanResult(parsed)
             ) {
-                val variants = listOf(
-                    "otsu" to ImageEnhancer.threshold(enhanced),
-                    "rotate-10" to ImageEnhancer.rotate(enhanced, -10f),
-                    "rotate10" to ImageEnhancer.rotate(enhanced, 10f)
-                )
-                val alternatives = coroutineScope {
-                    variants.map { (type, bitmap) ->
-                        async {
-                            val result = runCatching { recognizer.recognize(bitmap) }
-                                .onFailure { AnprLog.error("ocr_variant_error_$type", it) }
-                                .getOrNull()
-                            Triple(type, result, result?.let { IndianPlateParser.parse(it.normalizedText) })
-                        }
-                    }.awaitAll()
-                }
-                variants.forEach { it.second.recycle() }
-                for ((type, alternate, alternateParsed) in alternatives) {
-                    if (
-                        alternate != null &&
-                        alternateParsed != null &&
-                        preferRecognition(alternate, alternateParsed, recognition, parsed)
-                    ) {
-                        recognition = alternate
-                        parsed = alternateParsed
-                        AnprLog.debug("ocr_variant", "type" to type)
-                    }
+                val thresholded = ImageEnhancer.threshold(enhanced)
+                val alternate = runCatching { recognizer.recognize(thresholded) }
+                    .onFailure { AnprLog.error("ocr_variant_error_otsu", it) }
+                    .getOrNull()
+                thresholded.recycle()
+                val alternateParsed = alternate?.let { IndianPlateParser.parse(it.normalizedText) }
+                if (
+                    alternate != null &&
+                    alternateParsed != null &&
+                    preferRecognition(alternate, alternateParsed, recognition, parsed)
+                ) {
+                    recognition = alternate
+                    parsed = alternateParsed
+                    AnprLog.debug("ocr_variant", "type" to "otsu")
                 }
             }
 
@@ -219,6 +205,7 @@ class AnprPipeline @Inject constructor(
             )
 
             if (recognition == null || parsed == null) continue
+            if (recognition.normalizedText.length >= 2) ocrFragments += recognition.normalizedText
             if (parsed.validationConfidence < .70f) {
                 AnprLog.debug(
                     "plate_rejected",
@@ -262,7 +249,6 @@ class AnprPipeline @Inject constructor(
             } else if (verifyingPlate == null || vote.confidence > verifyingConfidence) {
                 verifyingPlate = vote.value
                 verifyingConfidence = vote.confidence
-                verifyingObservations = vote.observations
             }
         }
 
@@ -280,12 +266,39 @@ class AnprPipeline @Inject constructor(
             )
         }
 
+        val mergedPlate = PlateFragmentMerger.candidates(ocrFragments)
+            .asSequence()
+            .map(IndianPlateParser::parse)
+            .firstOrNull { it.validationConfidence >= .70f && IndianPlateParser.isCompleteScanResult(it) }
+        if (mergedPlate != null) {
+            val now = System.currentTimeMillis()
+            val candidate = PlateCandidate(
+                plateNumber = mergedPlate.normalized,
+                rawOcrText = ocrFragments.joinToString(" | "),
+                recognitionConfidence = .70f,
+                detectorConfidence = detections.maxOfOrNull { it.confidence } ?: 0f,
+                firstSeen = now,
+                lastSeen = now
+            )
+            AnprLog.debug("ocr_fragments_merged", "plate" to candidate.plateNumber, "fragments" to candidate.rawOcrText)
+            return@withContext PipelineResult(
+                detections = detections,
+                candidate = candidate.plateNumber,
+                confidence = candidate.recognitionConfidence,
+                status = "Confirm detected plate",
+                metrics = PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
+                sourceWidth = frame.width,
+                sourceHeight = frame.height,
+                selectableCandidates = listOf(candidate)
+            )
+        }
+
         if (verifyingPlate != null) {
             return@withContext PipelineResult(
                 detections = detections,
                 candidate = verifyingPlate,
                 confidence = verifyingConfidence,
-                status = "Verifying $verifyingObservations/2",
+                status = "Reading plate…",
                 metrics = PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
                 sourceWidth = frame.width,
                 sourceHeight = frame.height

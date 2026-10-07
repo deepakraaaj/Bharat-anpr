@@ -6,6 +6,8 @@ import org.junit.Test
 class PlateLogicTest {
     @Test fun normalizesWhitespaceAndCase(){assertEquals("TN01AB1234",PlateNormalizer.normalize("tn 01-ab 1234"))}
     @Test fun validatesCommonStates(){listOf("TN01AB1234","KA03MN1234","MH12DE1433","DL01ABC1234").forEach{assertTrue(it,IndianPlateValidator.isValid(it))}}
+    @Test fun validatesTelanganaTgCode(){assertTrue(IndianPlateValidator.isValid("TG07K5775"))}
+    @Test fun mergesOverlappingCropFragments(){assertTrue("TG07K5775" in PlateFragmentMerger.candidates(listOf("TG07K","K5775")))}
     @Test fun validatesBharatSeries(){val p=IndianPlateParser.parse("22BH1234AA");assertEquals(PlateFormat.BHARAT_SERIES,p.format);assertTrue(p.validationConfidence>.9f)}
     @Test fun onlyCompletePlateSerialsAreFinalizedByLiveScan(){assertFalse(IndianPlateParser.isCompleteScanResult(IndianPlateParser.parse("UP14TT7")));assertFalse(IndianPlateParser.isCompleteScanResult(IndianPlateParser.parse("UP14TT729")));assertEquals("UP14TT7",IndianPlateParser.parse("UP14TT7").normalized);assertTrue(IndianPlateParser.isCompleteScanResult(IndianPlateParser.parse("UP14TT7293")));assertTrue(IndianPlateParser.isCompleteScanResult(IndianPlateParser.parse("22BH1234AA")))}
     @Test fun correctsBySegmentOnly(){assertEquals("TN01AB1234",OcrErrorCorrector.correct("TN O1 AB I234"));assertEquals("TN01BO1234",OcrErrorCorrector.correct("TN01BO1234"))}

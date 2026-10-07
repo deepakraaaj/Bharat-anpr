@@ -4,7 +4,26 @@ data class ParsedPlate(val normalized: String, val format: PlateFormat, val vali
 enum class PlateFormat { STANDARD, BHARAT_SERIES, UNKNOWN }
 object PlateNormalizer { fun normalize(value:String)=value.uppercase().filter { it in 'A'..'Z'||it in '0'..'9' } }
 object IndianStateCodes {
-    val all=setOf("AN","AP","AR","AS","BR","CG","CH","DD","DL","DN","GA","GJ","HP","HR","JH","JK","KA","KL","LA","LD","MH","ML","MN","MP","MZ","NL","OD","OR","PB","PY","RJ","SK","TN","TR","TS","UK","UP","WB")
+    val all=setOf("AN","AP","AR","AS","BR","CG","CH","DD","DL","DN","GA","GJ","HP","HR","JH","JK","KA","KL","LA","LD","MH","ML","MN","MP","MZ","NL","OD","OR","PB","PY","RJ","SK","TN","TR","TS","TG","UK","UP","WB")
+}
+object PlateFragmentMerger {
+    fun candidates(fragments: List<String>): List<String> {
+        val normalized = fragments.map(PlateNormalizer::normalize).filter { it.length >= 2 }.distinct()
+        val merged = linkedSetOf<String>()
+        var frontier = normalized
+        repeat(2) {
+            val next = mutableListOf<String>()
+            for (left in frontier) for (right in normalized) {
+                if (left == right) continue
+                val overlap = (minOf(left.length, right.length) downTo 1)
+                    .firstOrNull { left.endsWith(right.take(it)) } ?: continue
+                val value = left + right.drop(overlap)
+                if (value.length in 8..12 && merged.add(value)) next += value
+            }
+            frontier = next
+        }
+        return merged.toList()
+    }
 }
 object OcrErrorCorrector {
     private val toDigit=mapOf('O' to '0','Q' to '0','U' to '0','D' to '0','I' to '1','L' to '4','Z' to '2','S' to '5','G' to '6','B' to '8')
