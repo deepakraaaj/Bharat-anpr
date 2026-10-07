@@ -16,7 +16,7 @@ The current build provides an end-to-end scanning pipeline, but its plate detect
 
 ## What is implemented
 
-- **Live camera flow:** CameraX binds a rear-camera preview and image analysis to the activity lifecycle. `KEEP_ONLY_LATEST` avoids queuing stale frames; a frame throttle and single-flight guard limit work to at most two analysis submissions per second.
+- **Live camera flow:** CameraX binds a rear-camera preview and image analysis to the activity lifecycle. A visible centered guide rectangle marks the scan region; frames are cropped to that region before detector inference. The ROI is mapped through the preview's `FILL_CENTER` transform so the guide and analyzed pixels align. `KEEP_ONLY_LATEST` avoids queuing stale frames; a frame throttle and single-flight guard limit work to at most two analysis submissions per second.
 - **Detection boundary and fallback:** `PlateDetector` defines the replaceable detector API. The current implementation scans reduced-resolution image regions for vertical-edge density, selects up to three non-overlapping candidates, expands their boxes, and assigns heuristic confidence. It uses no external detector weights.
 - **Crop preparation:** Candidate boxes are clamped to the source frame before cropping. The quality gate checks minimum dimensions, brightness, edge-based sharpness, and aspect ratio. Accepted crops are resized; Otsu thresholding and small-angle rotation are tried as OCR alternatives when parsing the first result does not pass the format confidence gate.
 - **On-device OCR:** The active Hilt binding is `MlKitPlateRecognizer`, using ML Kit's bundled Latin text-recognition model. The OCR interface is replaceable. A singleton, mutex-protected Tesseract implementation is included in the source, but is not the active binding.
@@ -31,15 +31,17 @@ The current build provides an end-to-end scanning pipeline, but its plate detect
 flowchart LR
     A["CameraX preview and YUV analysis"] --> B["KEEP_ONLY_LATEST"]
     B --> C["Frame throttle and single-flight guard"]
-    C --> D["PlateDetector<br/>vertical-edge heuristic"]
-    D --> E["Crop and image-quality gate"]
-    E --> F["Resize<br/>optional threshold or rotation retry"]
-    F --> G["PlateRecognizer<br/>active binding: ML Kit"]
-    G --> H["Normalize, parse, and correct<br/>Indian registration format"]
-    H --> I["IoU track association<br/>weighted temporal voting"]
-    I --> J["Duplicate cooldown"]
-    J --> K["Room plate history"]
-    K --> L["Compose scanner and history UI"]
+    C --> D["Map centered preview guide<br/>to frame coordinates"]
+    D --> E["Crop scan region"]
+    E --> F["PlateDetector<br/>vertical-edge heuristic"]
+    F --> G["Crop detection and image-quality gate"]
+    G --> H["Resize<br/>optional threshold or rotation retry"]
+    H --> I["PlateRecognizer<br/>active binding: ML Kit"]
+    I --> J["Normalize, parse, and correct<br/>Indian registration format"]
+    J --> K["IoU track association<br/>weighted temporal voting"]
+    K --> L["Duplicate cooldown"]
+    L --> M["Room plate history"]
+    M --> N["Compose scanner and history UI"]
 ```
 
 ### Main code areas
