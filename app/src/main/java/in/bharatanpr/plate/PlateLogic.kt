@@ -40,5 +40,10 @@ object IndianPlateParser {
         standard.matchEntire(corrected)?.let { m->return ParsedPlate(corrected,PlateFormat.STANDARD,.48f,m.groupValues.drop(1)) }
         return ParsedPlate(corrected,PlateFormat.UNKNOWN,0f,emptyList())
     }
+    fun isCompleteScanResult(plate: ParsedPlate): Boolean = when (plate.format) {
+        PlateFormat.STANDARD -> plate.segments.lastOrNull()?.length == 4
+        PlateFormat.BHARAT_SERIES -> plate.segments.getOrNull(2)?.length == 4 && plate.segments.lastOrNull()?.length == 2
+        PlateFormat.UNKNOWN -> false
+    }
 }
 object IndianPlateValidator { fun score(value:String)=IndianPlateParser.parse(value).validationConfidence; fun isValid(value:String)=score(value)>=.75f }
