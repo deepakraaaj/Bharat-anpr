@@ -12,6 +12,9 @@ import com.bharatanpr.recognition.RecognitionResult
 import com.bharatanpr.tracking.*
 import com.bharatanpr.util.AnprLog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -19,6 +22,15 @@ import kotlin.math.ceil
 import kotlin.math.floor
 
 data class PipelineMetrics(val detectorMs: Long = 0, val ocrMs: Long = 0, val totalMs: Long = 0)
+
+data class PlateCandidate(
+    val plateNumber: String,
+    val rawOcrText: String,
+    val recognitionConfidence: Float,
+    val detectorConfidence: Float,
+    val firstSeen: Long,
+    val lastSeen: Long
+)
 
 data class PipelineResult(
     val detections: List<Detection> = emptyList(),
@@ -28,7 +40,8 @@ data class PipelineResult(
     val status: String = "Scanning",
     val metrics: PipelineMetrics = PipelineMetrics(),
     val sourceWidth: Int = 1,
-    val sourceHeight: Int = 1
+    val sourceHeight: Int = 1,
+    val selectableCandidates: List<PlateCandidate> = emptyList()
 )
 
 @Singleton
@@ -39,6 +52,23 @@ class AnprPipeline @Inject constructor(
 ) {
     private val tracker = PlateTracker()
     private val duplicates = DuplicateSuppressor()
+
+    suspend fun accept(candidate: PlateCandidate, duplicateCooldownMs: Long): Boolean {
+        val now = System.currentTimeMillis()
+        if (!duplicates.shouldAccept(candidate.plateNumber, now, duplicateCooldownMs)) return false
+        repository.save(
+            PlateEntity(
+                plateNumber = candidate.plateNumber,
+                rawOcrText = candidate.rawOcrText,
+                recognitionConfidence = candidate.recognitionConfidence,
+                detectorConfidence = candidate.detectorConfidence,
+                timestamp = now,
+                firstSeen = candidate.firstSeen,
+                lastSeen = candidate.lastSeen
+            )
+        )
+        return true
+    }
 
     private fun preferRecognition(
         candidate: RecognitionResult,
@@ -116,6 +146,10 @@ class AnprPipeline @Inject constructor(
         val detectorMs = (System.nanoTime() - begin) / 1_000_000
         var ocrMs = 0L
         var incompletePlateSeen = false
+        var verifyingPlate: String? = null
+        var verifyingConfidence = 0f
+        var verifyingObservations = 0
+        val selectableCandidates = mutableListOf<PlateCandidate>()
 
         for (detection in detections) {
             val crop = runCatching { PlateCropper.crop(frame, detection.boundingBox) }
@@ -147,47 +181,32 @@ class AnprPipeline @Inject constructor(
                 parsed.validationConfidence < .70f ||
                 !IndianPlateParser.isCompleteScanResult(parsed)
             ) {
-                val thresholded = ImageEnhancer.threshold(enhanced)
-                val alternate = runCatching { recognizer.recognize(thresholded) }
-                    .onFailure { AnprLog.error("ocr_threshold_error", it) }
-                    .getOrNull()
-                thresholded.recycle()
-                val alternateParsed = alternate?.let { IndianPlateParser.parse(it.normalizedText) }
-                if (
-                    alternate != null &&
-                    alternateParsed != null &&
-                    preferRecognition(alternate, alternateParsed, recognition, parsed)
-                ) {
-                    recognition = alternate
-                    parsed = alternateParsed
-                    AnprLog.debug("ocr_variant", "type" to "otsu")
+                val variants = listOf(
+                    "otsu" to ImageEnhancer.threshold(enhanced),
+                    "rotate-10" to ImageEnhancer.rotate(enhanced, -10f),
+                    "rotate10" to ImageEnhancer.rotate(enhanced, 10f)
+                )
+                val alternatives = coroutineScope {
+                    variants.map { (type, bitmap) ->
+                        async {
+                            val result = runCatching { recognizer.recognize(bitmap) }
+                                .onFailure { AnprLog.error("ocr_variant_error_$type", it) }
+                                .getOrNull()
+                            Triple(type, result, result?.let { IndianPlateParser.parse(it.normalizedText) })
+                        }
+                    }.awaitAll()
                 }
-            }
-
-            if (
-                parsed == null ||
-                parsed.validationConfidence < .70f ||
-                !IndianPlateParser.isCompleteScanResult(parsed)
-            ) {
-                for (angle in listOf(-10f, 10f)) {
-                    val rotated = ImageEnhancer.rotate(enhanced, angle)
-                    val rotatedRecognition = runCatching { recognizer.recognize(rotated) }
-                        .onFailure { AnprLog.error("ocr_rotation_error", it) }
-                        .getOrNull()
-                    rotated.recycle()
-                    val rotatedParsed = rotatedRecognition?.let {
-                        IndianPlateParser.parse(it.normalizedText)
-                    }
+                variants.forEach { it.second.recycle() }
+                for ((type, alternate, alternateParsed) in alternatives) {
                     if (
-                        rotatedRecognition != null &&
-                        rotatedParsed != null &&
-                        preferRecognition(rotatedRecognition, rotatedParsed, recognition, parsed)
+                        alternate != null &&
+                        alternateParsed != null &&
+                        preferRecognition(alternate, alternateParsed, recognition, parsed)
                     ) {
-                        recognition = rotatedRecognition
-                        parsed = rotatedParsed
-                        AnprLog.debug("ocr_variant", "type" to "rotate$angle")
+                        recognition = alternate
+                        parsed = alternateParsed
+                        AnprLog.debug("ocr_variant", "type" to type)
                     }
-                    if (parsed?.let(IndianPlateParser::isCompleteScanResult) == true) break
                 }
             }
 
@@ -232,39 +251,44 @@ class AnprPipeline @Inject constructor(
                 )
             )
             if (vote.finalized) {
-                if (duplicates.shouldAccept(vote.value, now, duplicateCooldownMs)) {
-                    repository.save(
-                        PlateEntity(
-                            plateNumber = vote.value,
-                            rawOcrText = recognition.rawText,
-                            recognitionConfidence = vote.confidence,
-                            detectorConfidence = detection.confidence,
-                            timestamp = now,
-                            firstSeen = track.firstSeen,
-                            lastSeen = now
-                        )
-                    )
-                }
-                return@withContext PipelineResult(
-                    detections,
+                selectableCandidates += PlateCandidate(
                     vote.value,
-                    vote.value,
+                    recognition.rawText,
                     vote.confidence,
-                    "Recognized",
-                    PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
-                    frame.width,
-                    frame.height
+                    detection.confidence,
+                    track.firstSeen,
+                    now
                 )
+            } else if (verifyingPlate == null || vote.confidence > verifyingConfidence) {
+                verifyingPlate = vote.value
+                verifyingConfidence = vote.confidence
+                verifyingObservations = vote.observations
             }
+        }
+
+        val uniqueCandidates = selectableCandidates.distinctBy { it.plateNumber }
+        if (uniqueCandidates.isNotEmpty()) {
             return@withContext PipelineResult(
-                detections,
-                vote.value,
-                null,
-                vote.confidence,
-                "Verifying ${vote.observations}/2",
-                PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
-                frame.width,
-                frame.height
+                detections = detections,
+                candidate = uniqueCandidates.first().plateNumber,
+                confidence = uniqueCandidates.maxOf { it.recognitionConfidence },
+                status = if (uniqueCandidates.size == 1) "Confirm detected plate" else "Select a detected plate",
+                metrics = PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
+                sourceWidth = frame.width,
+                sourceHeight = frame.height,
+                selectableCandidates = uniqueCandidates
+            )
+        }
+
+        if (verifyingPlate != null) {
+            return@withContext PipelineResult(
+                detections = detections,
+                candidate = verifyingPlate,
+                confidence = verifyingConfidence,
+                status = "Verifying $verifyingObservations/2",
+                metrics = PipelineMetrics(detectorMs, ocrMs, (System.nanoTime() - begin) / 1_000_000),
+                sourceWidth = frame.width,
+                sourceHeight = frame.height
             )
         }
 

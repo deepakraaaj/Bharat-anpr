@@ -16,7 +16,7 @@ object ImageQualityAnalyzer {
         return PlateQuality(sharp,bright,image.width,image.height,ok,when{bright<20->"underexposed";bright>250->"overexposed";sharp<3->"blur";ratio !in 1.5f..8f->"aspect ratio";else->null}) }
 }
 object ImageEnhancer {
-    fun enhance(src:Bitmap):Bitmap { val targetW=640.coerceAtLeast(src.width); val scale=targetW.toFloat()/src.width; return Bitmap.createScaledBitmap(src,targetW,(src.height*scale).toInt().coerceAtLeast(1),true) }
+    fun enhance(src:Bitmap):Bitmap { val targetW=640; val scale=targetW.toFloat()/src.width; return Bitmap.createScaledBitmap(src,targetW,(src.height*scale).toInt().coerceAtLeast(1),true) }
 
     /** Otsu binarization improves black characters on yellow/white reflective plates. */
     fun threshold(src:Bitmap):Bitmap {

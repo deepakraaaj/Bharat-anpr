@@ -8,6 +8,7 @@ import com.bharatanpr.camera.FrameThrottle
 import com.bharatanpr.data.local.PlateEntity
 import com.bharatanpr.data.repository.PlateRepository
 import com.bharatanpr.pipeline.AnprPipeline
+import com.bharatanpr.pipeline.PlateCandidate
 import com.bharatanpr.pipeline.PipelineResult
 import com.bharatanpr.settings.AppSettings
 import com.bharatanpr.settings.SettingsRepository
@@ -17,9 +18,11 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
-data class ScannerState(val result:PipelineResult=PipelineResult(),val error:String?=null)
+data class ScannerState(val result:PipelineResult=PipelineResult(),val error:String?=null,val pendingCandidates:List<PlateCandidate> = emptyList())
 @HiltViewModel class MainViewModel @Inject constructor(private val pipeline:AnprPipeline,val repository:PlateRepository,private val settingsRepository:SettingsRepository):ViewModel(){
     val settings=settingsRepository.settings.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),AppSettings());val history=repository.history.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList());private val _scanner=MutableStateFlow(ScannerState());val scanner=_scanner.asStateFlow();private val busy=AtomicBoolean();private var lastPlateResultAt=0L;val throttle=FrameThrottle()
-    fun submit(bitmap:Bitmap,previewWidth:Int,previewHeight:Int){val s=settings.value;throttle.update(s.inferenceFps.coerceAtMost(2));if(!busy.compareAndSet(false,true)){bitmap.recycle();return};viewModelScope.launch{try{val region=DetectionRegion.centeredInPreview(bitmap.width,bitmap.height,previewWidth.takeIf{it>0}?:bitmap.width,previewHeight.takeIf{it>0}?:bitmap.height);val next=pipeline.process(bitmap,s.detectorConfidence,s.ocrConfidence,s.duplicateCooldownSeconds*1_000L,region);val now=System.currentTimeMillis();val hasPlate=next.candidate!=null||next.finalized!=null;if(hasPlate){lastPlateResultAt=now;_scanner.value=ScannerState(next)}else{val previous=_scanner.value.result;val previousHasPlate=previous.candidate!=null||previous.finalized!=null;if(previousHasPlate&&now-lastPlateResultAt<1_500L)_scanner.value=ScannerState(previous.copy(status="Hold plate in box…"))else _scanner.value=ScannerState(next)}}catch(t:Throwable){_scanner.value=ScannerState(error=t.message?:t.javaClass.simpleName)}finally{bitmap.recycle();busy.set(false)}}}
+    fun submit(bitmap:Bitmap,previewWidth:Int,previewHeight:Int){val s=settings.value;throttle.update(s.inferenceFps);if(_scanner.value.pendingCandidates.isNotEmpty()||!busy.compareAndSet(false,true)){bitmap.recycle();return};viewModelScope.launch{try{val region=DetectionRegion.centeredInPreview(bitmap.width,bitmap.height,previewWidth.takeIf{it>0}?:bitmap.width,previewHeight.takeIf{it>0}?:bitmap.height);val next=pipeline.process(bitmap,s.detectorConfidence,s.ocrConfidence,s.duplicateCooldownSeconds*1_000L,region);val now=System.currentTimeMillis();val hasPlate=next.candidate!=null||next.finalized!=null;if(next.selectableCandidates.isNotEmpty()){lastPlateResultAt=now;_scanner.value=ScannerState(next,pendingCandidates=next.selectableCandidates)}else if(hasPlate){lastPlateResultAt=now;_scanner.value=ScannerState(next)}else{val previous=_scanner.value.result;val previousHasPlate=previous.candidate!=null||previous.finalized!=null;if(previousHasPlate&&now-lastPlateResultAt<1_500L)_scanner.value=ScannerState(previous.copy(status="Hold plate in box…"))else _scanner.value=ScannerState(next)}}catch(t:Throwable){_scanner.value=ScannerState(error=t.message?:t.javaClass.simpleName)}finally{bitmap.recycle();busy.set(false)}}}
+    fun confirmCandidate(candidate:PlateCandidate)=viewModelScope.launch{val cooldown=settings.value.duplicateCooldownSeconds*1_000L;val saved=pipeline.accept(candidate,cooldown);_scanner.value=ScannerState(result=_scanner.value.result.copy(candidate=candidate.plateNumber,finalized=candidate.plateNumber,confidence=candidate.recognitionConfidence,status=if(saved)"Saved" else "Already saved recently",selectableCandidates=emptyList()))}
+    fun cancelCandidates(){_scanner.value=ScannerState()}
     fun update(s:AppSettings)=viewModelScope.launch{settingsRepository.update(s)};fun clearHistory()=viewModelScope.launch{repository.clear()}
 }
